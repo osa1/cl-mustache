@@ -1,5 +1,5 @@
-(ql:quickload '(fiveam cl-json cl-who cl-ppcre cl-interpol))
-(cl-interpol:enable-interpol-syntax)
+(ql:quickload '(fiveam cl-json cl-who cl-ppcre))
+;; cl-interpol
 
 ;; Utils ---------------------------------------------------------------
 
@@ -58,6 +58,16 @@ is replaced with replacement."
 (defun mustache-render (template data)
   (remove-double-mustaches
    (remove-triple-mustaches
+    (remove-sections
+     (remove-comments template)
+     data)
+    data)
+   data))
+
+
+(defun mustache-render (template data)
+  (remove-double-mustaches
+   (remove-triple-mustaches
     (remove-comments template)
     data)
    data))
@@ -77,19 +87,36 @@ is replaced with replacement."
             when end-index
             collect (subseq template start-index (+ (length end) end-index))))))
 
+(defvar section-pattern
+  "\\{\\{(#|&)\\s*?(\\S*?)\\s*?\\}\\}([\\s\\S]*?)\\{\\{/\\s*?(\\S*?)\\s*\\}\\}")
 (defun remove-sections (template data)
-  (let* ((section-starts (find-tags "{{#" "}}"))
-         (section-ends (find-tags "{{/" "}}")))))
+  (cl-ppcre:do-register-groups (section-char section-name section-content section-end)
+      (section-pattern template)
+    (when (char= (char section-char 0) #\#)
+      (let ((section-data (cdr (assoc (string->keyword section-name) data))))
+        (setf template
+              (replace-all template
+                           section-content
+                           (remove-double-mustaches
+                            (remove-triple-mustaches
+                             section-content section-data)
+                            section-data))))))
+  template)
+
+(defun name->data (name alist)
+  (let ((pos (position #\. name)))
+    (if pos
+        (name->data (subseq name (1+ pos))
+                    (cdr (assoc (string->keyword (subseq name 0 pos)) alist)))
+        (cdr (assoc (string->keyword name) alist)))))
 
 (defun remove-triple-mustaches (template data)
   ;; TODO: dotted names
   (let* ((tags (find-tags "{{{" "}}}" template))
          (replacements
            (loop for tag in tags
-                 collect (cdr (assoc
-                               (string->keyword
-                                (subseq tag 3 (- (length tag) 3)))
-                               data)))))
+                 collect (name->data (subseq tag 3 (- (length tag) 3))
+                                     data))))
     ;; TODO: a DOTO macro could be useful
     (loop for s in replacements
           for tag in tags do
@@ -103,12 +130,10 @@ is replaced with replacement."
   (let* ((tags (find-tags "{{" "}}" template))
          (replacements
            (loop for tag in tags
-                 collect (cdr (assoc
-                               (string->keyword
-                                (subseq tag (if (char= #\& (char tag 2))
-                                                3
-                                                2) (- (length tag) 2)))
-                               data)))))
+                 collect (name->data (subseq tag (if (char= #\& (char tag 2))
+                                                     3
+                                                     2) (- (length tag) 2))
+                                     data))))
     ;; TODO: a DOTO macro could be useful
     (loop for s in replacements
           for tag in tags do
