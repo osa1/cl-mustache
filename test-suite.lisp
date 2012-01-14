@@ -48,29 +48,12 @@ is replaced with replacement."
       obj
       (write-to-string obj)))
 
+(defmacro concat (&rest strs)
+  `(concatenate 'string ,@strs))
+
 ;; ---------------------------------------------------------------------
 
-(defvar *spec-directory* #P"~/cl-mustache/mustache.spec/")
-
-(defvar *all-specs* 
-  (mapcar #'utf8-json-decode (walk-directory *spec-directory* "specs/*.json")))
-
-(defun mustache-render (template data)
-  (remove-double-mustaches
-   (remove-triple-mustaches
-    (remove-sections
-     (remove-comments template)
-     data)
-    data)
-   data))
-
-
-(defun mustache-render (template data)
-  (remove-double-mustaches
-   (remove-triple-mustaches
-    (remove-comments template)
-    data)
-   data))
+(defvar *delimiters* '("{{" . "}}"))
 
 (defun remove-comments (template)
   (cl-ppcre:regex-replace-all "\\s*?\\{\\{\\![^\\}]*\\}\\}" template "")
@@ -87,21 +70,7 @@ is replaced with replacement."
             when end-index
             collect (subseq template start-index (+ (length end) end-index))))))
 
-(defvar section-pattern
-  "\\{\\{(#|&)\\s*?(\\S*?)\\s*?\\}\\}([\\s\\S]*?)\\{\\{/\\s*?(\\S*?)\\s*\\}\\}")
-(defun remove-sections (template data)
-  (cl-ppcre:do-register-groups (section-char section-name section-content section-end)
-      (section-pattern template)
-    (when (char= (char section-char 0) #\#)
-      (let ((section-data (cdr (assoc (string->keyword section-name) data))))
-        (setf template
-              (replace-all template
-                           section-content
-                           (remove-double-mustaches
-                            (remove-triple-mustaches
-                             section-content section-data)
-                            section-data))))))
-  template)
+(defvar implicit-iter-pattern "{{.}}")
 
 (defun name->data (name alist)
   (let ((pos (position #\. name)))
@@ -110,43 +79,77 @@ is replaced with replacement."
                     (cdr (assoc (string->keyword (subseq name 0 pos)) alist)))
         (cdr (assoc (string->keyword name) alist)))))
 
-(defun remove-triple-mustaches (template data)
-  ;; TODO: dotted names
-  (let* ((tags (find-tags "{{{" "}}}" template))
-         (replacements
-           (loop for tag in tags
-                 collect (name->data (subseq tag 3 (- (length tag) 3))
-                                     data))))
-    ;; TODO: a DOTO macro could be useful
-    (loop for s in replacements
-          for tag in tags do
-            (if s
-                (setf template (replace-all template tag (ensure-string s)))
-                (setf template (replace-all template tag "")))))
+(defun triple->double (template)
+  "Convert triple mustaches to double mustaches."
+  (destructuring-bind (open-delimiter . close-delimiter) *delimiters*
+    (setf template
+          (replace-all template (concat open-delimiter "{") (concat open-delimiter "&")))
+    (setf template
+          (replace-all template (concat "}" close-delimiter) close-delimiter)))
   template)
 
 (defun remove-double-mustaches (template data)
-  ;; TODO: dotted names
-  (let* ((tags (find-tags "{{" "}}" template))
-         (replacements
-           (loop for tag in tags
-                 collect (name->data (subseq tag (if (char= #\& (char tag 2))
-                                                     3
-                                                     2) (- (length tag) 2))
-                                     data))))
-    ;; TODO: a DOTO macro could be useful
-    (loop for s in replacements
-          for tag in tags do
-            (if s
-                (setf template (replace-all template tag
-                                            (if (char= #\& (char tag 2))
-                                                (ensure-string s)
-                                                (cl-who:escape-string-all
-                                                 (ensure-string s)))))
-                (setf template (replace-all template tag "")))))
+  (destructuring-bind (open-delimiter . close-delimiter) *delimiters*
+    (let* ((tags (find-tags open-delimiter close-delimiter template))
+           (replacements
+             (loop for tag in tags
+                   collect (name->data (subseq tag (if (char= #\& (char tag 2))
+                                                       3
+                                                       2) (- (length tag) 2))
+                                       data))))
+      (loop for s in replacements
+            for tag in tags do
+              (setf template (replace-all template tag
+                                          (if s
+                                              (if (char= #\& (char tag 2))
+                                                  (ensure-string s)
+                                                  (cl-who:escape-string-all
+                                                   (ensure-string s)))
+                                              ""))))))
   template)
 
+(defvar section-pattern
+  "(\\{\\{#\\s*?(\\S*?)\\s*?\\}\\}([\\s\\S]*?)\\{\\{/\\s*?(\\S*?)\\s*\\}\\})")
+(defun remove-sections (template data)
+  (cl-ppcre:do-register-groups (section section-name section-content section-end)
+      (section-pattern template)
+    (let ((section-data (cdr (assoc (string->keyword section-name) data)))
+          (implicit-iter-pos (search implicit-iter-pattern section-content)))
+      (cond (implicit-iter-pos
+             (setf template
+                   (replace-all template section-content
+                                (apply #'concatenate 'string
+                                       (loop for s in section-data
+                                             collect (replace-all
+                                                      section-content
+                                                      implicit-iter-pattern
+                                                      (ensure-string s)))))))
+            (t
+             (setf template
+                   (replace-all template
+                                section
+                                (if section-data
+                                    (remove-double-mustaches
+                                     section-content
+                                     section-data)
+                                    "")))))))
+  template)
+
+(defun mustache-render (template data &optional partial)
+  (declare (ignore partial))
+  (remove-double-mustaches
+   (remove-sections
+    (triple->double
+     (remove-comments template))
+    data)
+   data))
+
 ;; test suite ---------------------------------------------------
+
+(defvar *spec-directory* #P"~/cl-mustache/mustache.spec/")
+
+(defvar *all-specs* 
+  (mapcar #'utf8-json-decode (walk-directory *spec-directory* "specs/*.json")))
 
 (fiveam:def-suite :mustache-specs)
 (fiveam:in-suite :mustache-specs)
@@ -162,8 +165,9 @@ is replaced with replacement."
                   for data = (cdr (assoc :data test))
                   for expected = (cdr (assoc :expected test))
                   for desc = (cdr (assoc :desc test))
+                  for partial = (cdr (assoc :partials test))
                   collect `(fiveam:test ,(intern name) ,desc
-                             (fiveam:is (string= ,expected (mustache-render ,template ',data)))))))) 
+                             (fiveam:is (string= ,expected (mustache-render ,template ',data ',partial)))))))) 
 
 (defun pretty-result (test-result)
   (flet ((result-type (result) (format nil "~(~A~)" (symbol-name (type-of result)))))
