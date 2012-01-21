@@ -125,7 +125,7 @@
         (tag
          (princ
           (cl-who:escape-string-all
-           (ensure-string (cdr (assoc (tag-content token) data :key #'equalp))))
+           (ensure-string data))
           out)))))
   out)
 
@@ -150,20 +150,16 @@
                 (cond ((null tag-data)
                        (push *falsey-indicator* stack))
                       ((vectorp tag-data)
-                       (let ((section-tokens
-                                (collect-tokens (cdr token-list)
-                                                (make-tag :func-char #\/
-                                                          :content tag-content))))
-                          (if (listp (elt tag-data 0))
-                              (progn
-                                ;(format t "list~%")
-                                (loop for datum across tag-data do
-                                  (render section-tokens (list datum) partials out))
-                                (push *falsey-indicator* stack))
-                              (progn
-                                ;(format t "implicit iterator~%")
-                                (render-implicit-iterator section-tokens tag-data out)
-                                (push *falsey-indicator* stack)))))
+                       (unless (zerop (length tag-data))
+                         (let ((section-tokens
+                                 (collect-tokens (cdr token-list)
+                                                 (make-tag :func-char #\/
+                                                           :content tag-content))))
+                           (if (listp (elt tag-data 0))
+                               (loop for datum across tag-data do
+                                 (render section-tokens (list datum) partials out))
+                               (render-implicit-iterator section-tokens tag-data out))))
+                       (push *falsey-indicator* stack))
                       ((eq t tag-data)
                        (push (top-stack stack) stack))
                       (t (push tag-data stack))))
@@ -178,7 +174,8 @@
                   (princ (ensure-string tag-data) out)))
 
                ((#\>)
-                (render (cdr (assoc tag-content partials :test #'equalp)) stack partials out))
+                (unless (eql (top-stack stack) *falsey-indicator*)
+                  (render (cdr (assoc tag-content partials :test #'equalp)) stack partials out)))
 
                ((#\!))
                
