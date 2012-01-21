@@ -166,12 +166,7 @@
                                 (push *falsey-indicator* stack)))))
                       ((eq t tag-data)
                        (push (top-stack stack) stack))
-                      (t (push tag-data stack)))
-                (if (null tag-data)
-                    (push *falsey-indicator* stack)
-                    (if (vectorp tag-data)
-                        
-                        )))
+                      (t (push tag-data stack))))
 
                ((#\^))
                
