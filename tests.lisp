@@ -7,7 +7,8 @@
   (with-open-file (stream pathname
                           :direction :input
                           :external-format :utf-8)
-    (json:decode-json-from-source stream)))
+    (json:parse stream :object-as :alist
+                       :json-arrays-as-vectors t)))
 
 (defvar *spec-directory* #P"~/cl/cl-mustache/mustache.spec/")
 
@@ -22,13 +23,13 @@
      ,@(loop 
          for spec in (eval specs)
          append (loop
-                  for test in (cdr (assoc :tests spec))
-                  for name = (cdr (assoc :name test))
-                  for template = (cdr (assoc :template test))
-                  for data = (cdr (assoc :data test))
-                  for expected = (cdr (assoc :expected test))
-                  for desc = (cdr (assoc :desc test))
-                  for partial = (cdr (assoc :partials test))
+                  for test across (cdr (assoc "tests" spec :test #'equalp))
+                  for name = (cdr (assoc "name" test :test #'equalp))
+                  for template = (cdr (assoc "template" test :test #'equalp))
+                  for data = (cdr (assoc "data" test :test #'equalp))
+                  for expected = (cdr (assoc "expected" test :test #'equalp))
+                  for desc = (cdr (assoc "desc" test :test #'equalp))
+                  for partial = (cdr (assoc "partials" test :test #'equalp))
                   collect `(fiveam:test ,(intern name) ,desc
                              (fiveam:is (string= ,expected (mustache-render ,template ',data ',partial)))))))) 
 

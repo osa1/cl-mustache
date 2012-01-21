@@ -2,13 +2,6 @@
 
 ;; Utils ---------------------------------------------------------------
 
-(defun remove-whitespace (str)
-  "Remove trailing and following whitespace."
-  (string-trim '(#\ ) str))
-
-(defun string->keyword (str)
-  (intern (string-upcase (remove-whitespace str)) "KEYWORD"))
-
 (defun ensure-string (obj)
   (if obj
       (if (stringp obj)
@@ -19,9 +12,9 @@
 (defun search-alist (name alist)
   (let* ((dot-pos (search "." name))
          (key (if dot-pos
-                  (string->keyword (subseq name 0 dot-pos))
-                  (string->keyword name)))
-         (result (cdr (assoc key alist))))
+                  (subseq name 0 dot-pos)
+                  name))
+         (result (cdr (assoc key alist :test #'equalp))))
     (if dot-pos
         (search-alist (subseq name (1+ dot-pos)) result)
         result)))
@@ -30,15 +23,18 @@
   ;; stack is a list of plists
   (let* ((dot-pos (search "." name))
          (key (if dot-pos
-                  (string->keyword (subseq name 0 dot-pos))
-                  (string->keyword name)))
+                  (subseq name 0 dot-pos)
+                  name))
          (result
            (find key stack :test (lambda (key alist)
-                                   (assoc key alist)))))
+                                   (assoc key alist :test #'equalp)))))
     (when result
       (if dot-pos
           (search-alist name result)
-          (cdr (assoc key result))))))
+          (cdr (assoc key result :test #'equalp))))))
+
+(defun top-stack (stack)
+  (first stack))
 
 ;; ---------------------------------------------------------------------
 
@@ -48,19 +44,7 @@
 
 (defvar *delimiter* (make-delimiter :start "{{" :end "}}"))
 
-(defvar *falsey-indicator* '(nil))
-
-(defun add-to-stack (alist &optional stack)
-  (if stack
-      (cons alist stack)
-      (list alist `((:delimiter . ,*delimiter*)))))
-
-(defun pop-stack (stack)
-  (values (first stack)
-          (rest stack)))
-
-(defun top-stack (stack)
-  (car stack))
+(defvar *falsey-indicator* 'nilnilnil)
 
 (defvar pt-whitespace '(:non-greedy-repetition 0 nil :whitespace-char-class))
 (defvar pt-greedy-whitespace '(:greedy-repetition 0 nil :whitespace-char-class))
@@ -68,7 +52,7 @@
 (defvar pt-everything '(:non-greedy-repetition 0 nil :everything))
 
 (defun make-tag-parser (&key (delimiter *delimiter*)
-                          (func-char '(:alternation "=" "{" "^" "!" "&" "#" "/" :void))
+                          (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
                           (content '(:non-greedy-repetition 0 nil :everything))
                           (end-char '(:alternation "=" "}" :void)))
   `(:sequence
@@ -87,6 +71,10 @@
 
 (defstruct tag func-char content)
 
+(defun tag-equal-p (tag1 tag2)
+  (and (equal (tag-content tag1) (tag-content tag2))
+       (eql (tag-func-char tag1) (tag-func-char tag2))))
+
 (defun parse-delimiter (delimiter-tag-content)
   "Split delimiters in delimiter change tag and return new delimiter struct."
   (destructuring-bind (open-delimiter close-delimiter)
@@ -94,108 +82,117 @@
                       delimiter-tag-content)
     (make-delimiter :start open-delimiter :end close-delimiter)))
 
-(defun make-template-parser (template)
-  (lambda (delimiter)
-    (let ((parser (make-tag-parser :delimiter delimiter)))
-      (multiple-value-bind (start-idx end-idx parts-start parts-end)
-          (cl-ppcre:scan parser template)
-        (if (null start-idx)
-            (let ((token template))
-              (setf template nil)
-              token)
-            (if (zerop start-idx)
-                (let ((func-char (if (= (elt parts-start 1) (elt parts-end 1))
-                                     nil
-                                     (char template (elt parts-start 1))))
-                      (content (subseq template (elt parts-start 2) (elt parts-end 2))))
-                  (setf template (subseq template end-idx))
-                  (make-tag :func-char func-char
-                            :content content))
-                (let ((token (subseq template 0 start-idx)))
-                  (setf template (subseq template start-idx))
-                  token)))))))
+(defun parse-template (template &optional (result '()) (delimiter-stack (list *delimiter*)))
+  (let ((parser (make-tag-parser :delimiter (top-stack delimiter-stack))))
+    (multiple-value-bind (start-idx end-idx parts-start parts-end)
+        (cl-ppcre:scan parser template)
+      (if (null start-idx)
+          (reverse (cons template result)) ;; template doesn't contain tags
+          (if (zerop start-idx)
+              (let ((func-char (if (= (elt parts-start 1) (elt parts-end 1))
+                                   nil
+                                   (char template (elt parts-start 1))))
+                    (content (subseq template (elt parts-start 2) (elt parts-end 2))))
+                (case func-char
+                  ((#\# #\^)
+                   (push (top-stack delimiter-stack) delimiter-stack))
+                  ((#\=)
+                   (pop delimiter-stack)
+                   (push (parse-delimiter content) delimiter-stack))
+                  ((#\/)
+                   (pop delimiter-stack)))
+                (parse-template (subseq template end-idx)
+                                (cons (make-tag :func-char func-char
+                                                :content content)
+                                      result)
+                                delimiter-stack))
+              (parse-template (subseq template start-idx)
+                              (cons (subseq template 0 start-idx) result)
+                              delimiter-stack))))))
 
-(defun get-next-token (parser delimiter)
-  (funcall parser delimiter))
+(defun collect-tokens (tokens target)
+  (loop for token in tokens
+        while (or (not (tag-p token))
+                  (not (tag-equal-p token target)))
+        collect token))
 
-(defun render-lambda (lambda &optional param)
-  (apply
-   (eval
-    (read-from-string lambda))
-   param))
+(defun render-implicit-iterator (tokens list out)
+  (loop for data across list do
+    (loop for token in tokens do
+      (typecase token
+        (string
+         (princ token out))
+        (tag
+         (princ
+          (cl-who:escape-string-all
+           (ensure-string (cdr (assoc (tag-content token) data :key #'equalp))))
+          out)))))
+  out)
 
-(defun alistp (list)
-  ;; cl-json converts JSON dictionaries to plists and JSON lists to
-  ;; lists, only way came to my mind to distinguish them is this
-  (and (consp list)
-       (consp (car list))
-       (consp (caar list))
-       (keywordp (caaar list))))
+(defun render (template-or-tokens stack partials &optional (out (make-string-output-stream)))
+  (let ((tokens (if (stringp template-or-tokens)
+                    (parse-template template-or-tokens)
+                    template-or-tokens)))
+    (loop for token-list on tokens do
+      (let ((token (first token-list)))
+        (typecase token
+          (string
+           (unless (eql (top-stack stack) *falsey-indicator*)
+             ;(format t "printing: ~S~%" token)
+             (princ token out)))
+          (tag
+           (let* ((func-char (tag-func-char token))
+                  (tag-content (tag-content token))
+                  (tag-data (search-stack tag-content stack)))
+             (case func-char
+               
+               ((#\#)
+                (cond ((null tag-data)
+                       (push *falsey-indicator* stack))
+                      ((vectorp tag-data)
+                       (let ((section-tokens
+                                (collect-tokens (cdr token-list)
+                                                (make-tag :func-char #\/
+                                                          :content tag-content))))
+                          (if (listp (elt tag-data 0))
+                              (progn
+                                ;(format t "list~%")
+                                (loop for datum across tag-data do
+                                  (render section-tokens (list datum) partials out))
+                                (push *falsey-indicator* stack))
+                              (progn
+                                ;(format t "implicit iterator~%")
+                                (render-implicit-iterator section-tokens tag-data out)
+                                (push *falsey-indicator* stack)))))
+                      ((eq t tag-data)
+                       (push (top-stack stack) stack))
+                      (t (push tag-data stack)))
+                (if (null tag-data)
+                    (push *falsey-indicator* stack)
+                    (if (vectorp tag-data)
+                        
+                        )))
 
-(defun render-tag (tag stack out)
-  ;; TODO: handle wrong nested sections
-  (if (not (equal (top-stack stack) *falsey-indicator*))
-      (case (tag-func-char tag)
-        ((#\=)
-         (let ((new-delimiter (parse-delimiter (tag-content tag))))
-           (multiple-value-bind (top rest)
-               (pop-stack stack)
-             (add-to-stack (cons `(:delimiter . ,new-delimiter) top)
-                           rest))))
-        ((#\#)
-         (let ((content (search-stack (tag-content tag) stack)))
-           ;(format t "content: ~S~%" content)
-           (if (alistp content)
-               'alist
-               (if (eq content t)
-                   (add-to-stack (top-stack stack) stack)
-                   ;; basically I'm putting *falsey-indicator* to the
-                   ;; stack when I don't want to render content of a section
-                   (if content
-                       (add-to-stack content stack)
-                       (add-to-stack *falsey-indicator* stack))))))
-        ((#\/)
-         (nth-value 1 (pop-stack stack)))
-        ((#\{ #\&)
-         (princ (ensure-string (search-stack (tag-content tag) stack)) out)
-         stack)
-        ((#\^)
-         (let ((content (search-stack (tag-content tag) stack)))
-           (if (null content)
-               (add-to-stack (top-stack stack) stack)
-               (add-to-stack *falsey-indicator* stack))))
-        (t
-         (let ((data (search-stack (tag-content tag) stack)))
-           ;; (if (string= (tag-content tag) "lambda")
-           ;;     (render-tag (render-lambda (search-alist "lisp" data) nil) stack out)
-           ;;     (princ (cl-who:escape-string-all
-           ;;             (ensure-string data)) out)))
-           (princ (cl-who:escape-string-all
-                   (ensure-string data)) out)
-         stack)))
-      (if (eql #\/ (tag-func-char tag))
-          (nth-value 1 (pop-stack stack))
-          stack)))
+               ((#\^))
+               
+               ((#\/)
+                (pop stack))
+               
+               ((#\{ #\&)
+                (unless (eql (top-stack stack) *falsey-indicator*)
+                  (princ (ensure-string tag-data) out)))
 
-(defun render (template stack
-               &optional (out (make-string-output-stream)))
-  (let ((parser (make-template-parser template)))
-    (loop for s = (get-next-token parser (search-stack "delimiter" stack))
-          while s do
-            ;(format t "s: ~S~%" s)
-            (typecase s
-              (string
-               (unless (equal (top-stack stack) *falsey-indicator*)
-                 ;(format t "top-stack: ~S~%" (top-stack stack))
-                 ;(format t "s: ~S~%" s)
-                 (princ s out)))
-              (tag
-               (setf stack (render-tag s stack out))
-               ;(format t "new stack: ~S~%" stack)
-               ))))
-  (get-output-stream-string out))
+               ((#\>)
+                (render (cdr (assoc tag-content partials :test #'equalp)) stack partials out))
 
-(defun mustache-render (template data &optional partial)
-  (declare (ignore partial))
-  (render template (add-to-stack data)))
+               ((#\!))
+               
+               (t
+                (unless (eql (top-stack stack) *falsey-indicator*)
+                  (princ (cl-who:escape-string-all (ensure-string tag-data)) out))))))))))
+  out)
+
+(defun mustache-render (template data &optional partials)
+  (get-output-stream-string
+   (render template (list data) partials)))
 
