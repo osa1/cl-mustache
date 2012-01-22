@@ -45,8 +45,8 @@
 (defvar *delimiter* (make-delimiter :start "{{" :end "}}"))
 
 ;; basically I'm putting this indicator when I don't want to render
-;; contents of a section. This should be a list to not break
-;; `search-stack`
+;; contents of a section by `render` function. This should be a list
+;; which contains a list to not break `search-stack`
 (defvar *falsey-indicator* '(nil))
 
 (defvar pt-whitespace '(:non-greedy-repetition 0 nil :whitespace-char-class))
@@ -78,7 +78,7 @@
 
 (defun make-tag-parser (&key (delimiter *delimiter*)
                           (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
-                          (content '(:non-greedy-repetition 0 nil :everything))
+                          (content pt-everything)
                           (end-char '(:alternation "=" "}" :void)))
   `(:sequence
     (:alternation
@@ -108,40 +108,46 @@
     (make-delimiter :start open-delimiter :end close-delimiter)))
 
 (defun parse-template (template &optional (result '()) (delimiter-stack (list *delimiter*)))
+  "Parse template to tokens. A token is a string or tag struct.
+This function also removes delimiter change tags from template, so there's no need to
+handle delimiter change tags in render function."
   (let ((parser (make-tag-parser :delimiter (top-stack delimiter-stack))))
     (multiple-value-bind (start-idx end-idx parts-start parts-end)
         (cl-ppcre:scan parser template)
-      (if (null start-idx)
-          (reverse (cons template result)) ;; template doesn't contain tags
-          (if (zerop start-idx)
-              (let ((func-char (if (= (elt parts-start 1) (elt parts-end 1))
-                                   nil
-                                   (char template (elt parts-start 1))))
-                    (content (subseq template (elt parts-start 2) (elt parts-end 2))))
-                (case func-char
-                  ((#\# #\^)
-                   (push (top-stack delimiter-stack) delimiter-stack))
-                  ((#\=)
-                   (pop delimiter-stack)
-                   (push (parse-delimiter content) delimiter-stack))
-                  ((#\/)
-                   (pop delimiter-stack)))
-                (parse-template (subseq template end-idx)
-                                (cons (make-tag :func-char func-char
-                                                :content content)
-                                      result)
-                                delimiter-stack))
-              (parse-template (subseq template start-idx)
-                              (cons (subseq template 0 start-idx) result)
-                              delimiter-stack))))))
+      (cond ((null start-idx) ;; rest of the template doesn't contain any tags
+             (reverse (cons template result)))
+            ((zerop start-idx) ;; next tag is at the beginning of template
+             (let ((func-char (if (= (elt parts-start 1) (elt parts-end 1))
+                                  nil
+                                  (char template (elt parts-start 1))))
+                   (content (subseq template (elt parts-start 2) (elt parts-end 2))))
+               (case func-char
+                 ((#\# #\^)
+                  (push (top-stack delimiter-stack) delimiter-stack))
+                 ((#\=)
+                  (pop delimiter-stack)
+                  (push (parse-delimiter content) delimiter-stack))
+                 ((#\/)
+                  (pop delimiter-stack)))
+               (parse-template (subseq template end-idx)
+                               (cons (make-tag :func-char func-char
+                                               :content content)
+                                     result)
+                               delimiter-stack)))
+            (t ;; have a string before tag, should render it first
+             (parse-template (subseq template start-idx)
+                             (cons (subseq template 0 start-idx) result)
+                             delimiter-stack))))))
 
 (defun collect-tokens (tokens target)
+  "Collect tokens in token list up to target tag."
   (loop for token in tokens
         while (or (not (tag-p token))
                   (not (tag-equal-p token target)))
         collect token))
 
 (defun render-implicit-iterator (tokens list out)
+  "Renders tokens for each element in list and princs to `out`. Returns `out`."
   (loop for data across list do
     (loop for token in tokens do
       (typecase token
@@ -155,59 +161,63 @@
   out)
 
 (defun render (template-or-tokens stack partials &optional (out (make-string-output-stream)))
+  "Renders a template or list of tokens and princs it to `out` output stream. Returns out.
+Tokens is a string or mustache tag(struct tag). Stack is a list of alists."
+  ;; Parse template to tokens when needed
   (let ((tokens (if (stringp template-or-tokens)
                     (parse-template template-or-tokens)
                     template-or-tokens)))
     (loop for token-list on tokens do
       (let ((token (first token-list)))
-        (typecase token
-          (string
-           (unless (eql (top-stack stack) *falsey-indicator*)
-             ;(format t "printing: ~S~%" token)
-             (princ token out)))
-          (tag
-           (let* ((func-char (tag-func-char token))
-                  (tag-content (tag-content token))
-                  (tag-data (search-stack tag-content stack)))
-             (case func-char
-               
-               ((#\#)
-                (cond ((null tag-data)
-                       (push *falsey-indicator* stack))
-                      ((vectorp tag-data)
-                       (unless (zerop (length tag-data))
-                         (let ((section-tokens
-                                 (collect-tokens (cdr token-list)
-                                                 (make-tag :func-char #\/
-                                                           :content tag-content))))
-                           (if (listp (elt tag-data 0))
-                               (loop for datum across tag-data do
-                                 (render section-tokens (list datum) partials out))
-                               (render-implicit-iterator section-tokens tag-data out))))
-                       (push *falsey-indicator* stack))
-                      ((eq t tag-data)
-                       (push (top-stack stack) stack))
-                      (t (push tag-data stack))))
+        (cond ((eql (top-stack stack) *falsey-indicator*)
+               (when (and (tag-p token)
+                          (eql (tag-func-char token) #\/))
+                 (pop stack)))
+              ((stringp token)
+               (princ token out))
+              (t ;; token is a tag
+               (let* ((func-char (tag-func-char token))
+                      (tag-content (tag-content token))
+                      (tag-data (search-stack tag-content stack)))
+                 (case func-char
+                   
+                   ((#\#)
+                    (cond ((null tag-data)
+                           (push *falsey-indicator* stack))
+                          ((vectorp tag-data)
+                           (unless (zerop (length tag-data))
+                             (let ((section-tokens
+                                     (collect-tokens (cdr token-list)
+                                                     (make-tag :func-char #\/
+                                                               :content tag-content))))
+                               (if (listp (elt tag-data 0))
+                                   (loop for datum across tag-data do
+                                     (render section-tokens (list datum) partials out))
+                                   (render-implicit-iterator section-tokens tag-data out))))
+                           (push *falsey-indicator* stack))
+                          ((eq t tag-data)
+                           (push (top-stack stack) stack))
+                          ((string= tag-content "lambda")
+                           ;; TODO: lambda support
+                           )
+                          (t (push tag-data stack))))
 
-               ((#\^))
-               
-               ((#\/)
-                (pop stack))
-               
-               ((#\{ #\&)
-                (unless (eql (top-stack stack) *falsey-indicator*)
-                  (princ (ensure-string tag-data) out)))
+                   ((#\^))
+                   
+                   ((#\/)
+                    (pop stack))
+                   
+                   ((#\{ #\&)
+                    (princ (ensure-string tag-data) out))
 
-               ((#\>)
-                (unless (eql (top-stack stack) *falsey-indicator*)
-                  (render
-                   (cdr (assoc tag-content partials :test #'equalp)) stack partials out)))
+                   ((#\>)
+                    (render
+                     (cdr (assoc tag-content partials :test #'equalp)) stack partials out))
 
-               ((#\!))
-               
-               (t
-                (unless (eql (top-stack stack) *falsey-indicator*)
-                  (princ (cl-who:escape-string-all (ensure-string tag-data)) out))))))))))
+                   ((#\!))
+                   
+                   (t
+                    (princ (cl-who:escape-string-all (ensure-string tag-data)) out)))))))))
   out)
 
 (defun mustache-render (template data &optional partials)
