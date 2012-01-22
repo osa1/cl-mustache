@@ -44,12 +44,37 @@
 
 (defvar *delimiter* (make-delimiter :start "{{" :end "}}"))
 
-(defvar *falsey-indicator* 'nilnilnil)
+;; basically I'm putting this indicator when I don't want to render
+;; contents of a section. This should be a list to not break
+;; `search-stack`
+(defvar *falsey-indicator* '(nil))
 
 (defvar pt-whitespace '(:non-greedy-repetition 0 nil :whitespace-char-class))
 (defvar pt-greedy-whitespace '(:greedy-repetition 0 nil :whitespace-char-class))
-(defvar pt-non-whitespace '(:non-greedy-repetition 0 nil :non-whitespace-char-class)) 
-(defvar pt-everything '(:non-greedy-repetition 0 nil :everything))
+(defvar pt-everything '(:non-greedy-repetition 0 nil (:alternation :everything #\Newline)))
+
+;; (defun make-tag-parser (&key (delimiter *delimiter*)
+;;                           (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
+;;                           (content pt-everything)
+;;                           (end-char '(:alternation "=" "}" :void)))
+;;   (let ((tag-body
+;;           `(,(delimiter-start delimiter)
+;;              ,pt-greedy-whitespace
+;;              (:register ,func-char)
+;;              ,pt-greedy-whitespace
+;;              (:register ,content)
+;;              ,pt-whitespace
+;;              ,end-char
+;;              ,(delimiter-end delimiter))))
+;;     `(:alternation
+;;       (:sequence ;; standalone tag
+;;        (:positive-lookbehind #\Newline)
+;;        (:greedy-repetition 0 nil " ")
+;;        ;:start-anchor (:greedy-repetition 0 nil #\ )
+;;        ,@tag-body
+;;        (:greedy-repetition 0 nil " ") #\Newline)
+;;       (:sequence
+;;        ,@tag-body))))
 
 (defun make-tag-parser (&key (delimiter *delimiter*)
                           (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
@@ -175,7 +200,8 @@
 
                ((#\>)
                 (unless (eql (top-stack stack) *falsey-indicator*)
-                  (render (cdr (assoc tag-content partials :test #'equalp)) stack partials out)))
+                  (render
+                   (cdr (assoc tag-content partials :test #'equalp)) stack partials out)))
 
                ((#\!))
                
