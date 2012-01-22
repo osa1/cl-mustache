@@ -1,16 +1,17 @@
 
+CL-Mustache - {{ Mutache }} for Common Lisp
+-------------------------------------------
+
+I wrote this project mostly in my free time at my internship to get a better understanding of Lisp way of doing things and contribute to Lisp community. This is my first CL library and I'm still learning CL so there should be room for improvements. I'm open to all advices to improve the code.
+
+Right now this project passes 67 of 88 tests in [mutsache specs](https://github.com/mustache/spec). 10 of 21 tests is about lambdas, which are not yet implemented(I need to add Common Lisp lambdas to YAML files in mustache specs and I don't know anything about YAML file format). Other 11 tests is about whitespaces, ie. removing/leaving after/before tags(I'm trying to solve this with only changing parse tree).
+
+Test suite is inspired by [this](http://msnyder.info/posts/2011/12/common-lisp-mustache/) blog post.
 
 TODO
 ----
 
- - Can CL-JSON convert JSON dictionaries to CL hash-tables instead of plists without modifying JSON data?
- - (Also, converting JSON dictironaries' keys to strings instead of keywords could be useful since I'm reading variables as strings from mustache templates)
- - (Maybe I should use [YASON](http://common-lisp.net/project/yason/) instead of CL-JSON. It has support for converting different JSON data structures to different CL data structures without modifying JSON data)
-
-
  - Lambdas
- - Inverted sections
- - Implicit iterators
  - Whitespace problems
 
 
