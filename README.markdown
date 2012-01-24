@@ -12,5 +12,5 @@ TODO
 
  - Lambdas
  - Whitespace problems
-
+ - Reading from stream insted of strings could be better since users can easily create stream from a string with (with-input-from-string ..), (make-string-input-stream ..) etc.
 
