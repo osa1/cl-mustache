@@ -20,7 +20,7 @@
         result)))
 
 (defun search-stack (name stack)
-  ;; stack is a list of plists
+  ;; stack is a list of alists
   (let* ((dot-pos (search "." name))
          (key (if dot-pos
                   (subseq name 0 dot-pos)
@@ -69,30 +69,54 @@
 ;;     `(:alternation
 ;;       (:sequence ;; standalone tag
 ;;        (:positive-lookbehind #\Newline)
-;;        (:greedy-repetition 0 nil " ")
+;;        (:greedy-repetition 0 nil #\ )
 ;;        ;:start-anchor (:greedy-repetition 0 nil #\ )
 ;;        ,@tag-body
-;;        (:greedy-repetition 0 nil " ") #\Newline)
+;;        (:greedy-repetition 0 nil #\ ) #\Newline)
 ;;       (:sequence
 ;;        ,@tag-body))))
+
 
 (defun make-tag-parser (&key (delimiter *delimiter*)
                           (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
                           (content pt-everything)
                           (end-char '(:alternation "=" "}" :void)))
   `(:sequence
-    (:alternation
-     (:sequence #\Newline ,pt-greedy-whitespace) "")
     (:register
-     (:sequence
-      ,(delimiter-start delimiter)
-      ,pt-greedy-whitespace
-      (:register ,func-char)
-      ,pt-greedy-whitespace
-      (:register ,content)
-      ,pt-whitespace
-      ,end-char
-      ,(delimiter-end delimiter)))))
+     (:alternation
+      (:sequence #\Newline ,pt-greedy-whitespace) ""))
+    (:sequence
+     ,(delimiter-start delimiter)
+     ,pt-greedy-whitespace
+     (:register ,func-char)
+     ,pt-greedy-whitespace
+     (:register ,content)
+     ,pt-whitespace
+     ,end-char
+     ,(delimiter-end delimiter)
+     (:register
+      (:alternation
+       (:sequence ,pt-greedy-whitespace #\Newline) "")))))
+
+(defun handle-standalone-tag (tag-parts)
+  (let ((before-tag (elt tag-parts 0)) ;; destructuring on arrays?
+        (func-char (if (zerop (length (elt tag-parts 1)))
+                       nil
+                       (char (elt tag-parts 1) 0)))
+        (tag-content (elt tag-parts 2))
+        (after-tag (elt tag-parts 3)))
+    (let ((tag (make-tag :func-char func-char
+                         :content tag-content)))
+      (if (and (position #\Newline before-tag)
+               (position #\Newline after-tag)
+               )
+          ;; tag is standalone, we need to add a newline since we
+          ;; matched 2 newlines
+          ;(list (string #\Newline) tag)
+          (list tag (string #\Newline))
+          ;; tag is not standalone, we need to add spaces to rendered string
+          ;(list before-tag tag after-tag)
+          (list after-tag tag before-tag)))))
 
 (defstruct tag func-char content)
 
@@ -129,15 +153,18 @@ handle delimiter change tags in render function."
                   (push (parse-delimiter content) delimiter-stack))
                  ((#\/)
                   (pop delimiter-stack)))
+               ;; TODO: why this call is not tail-call optimized?
                (parse-template (subseq template end-idx)
-                               (cons (make-tag :func-char func-char
-                                               :content content)
-                                     result)
+                               (append
+                                (handle-standalone-tag
+                                 (nth-value 1 (cl-ppcre:scan-to-strings parser template)))
+                                result)
                                delimiter-stack)))
             (t ;; have a string before tag, should render it first
              (parse-template (subseq template start-idx)
                              (cons (subseq template 0 start-idx) result)
                              delimiter-stack))))))
+
 
 (defun collect-tokens (tokens target)
   "Collect tokens in token list up to target tag."
@@ -162,7 +189,7 @@ handle delimiter change tags in render function."
 
 (defun render (template-or-tokens stack partials &optional (out (make-string-output-stream)))
   "Renders a template or list of tokens and princs it to `out` output stream. Returns out.
-Tokens is a string or mustache tag(struct tag). Stack is a list of alists."
+A token is a string or mustache tag(struct tag). Stack is a list of alists."
   ;; Parse template to tokens when needed
   (let ((tokens (if (stringp template-or-tokens)
                     (parse-template template-or-tokens)
@@ -223,4 +250,3 @@ Tokens is a string or mustache tag(struct tag). Stack is a list of alists."
 (defun mustache-render (template data &optional partials)
   (get-output-stream-string
    (render template (list data) partials)))
-
