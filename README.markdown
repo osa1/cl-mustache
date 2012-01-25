@@ -1,4 +1,4 @@
-CL-Mustache - {{ Mutache }} for Common Lisp
+CL-Mustache - {{ Mustache }} for Common Lisp
 -------------------------------------------
 
 I wrote this project mostly in my free time at my internship to get a better understanding of Lisp way of doing things and contribute to Lisp community. This is my first CL library and I'm still learning CL so there should be room for improvements. I'm open to all advices to improve the code.
