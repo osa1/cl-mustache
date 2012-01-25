@@ -53,38 +53,43 @@
 (defvar pt-greedy-whitespace '(:greedy-repetition 0 nil :whitespace-char-class))
 (defvar pt-everything '(:non-greedy-repetition 0 nil (:alternation :everything #\Newline)))
 
-;; (defun make-tag-parser (&key (delimiter *delimiter*)
-;;                           (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
-;;                           (content pt-everything)
-;;                           (end-char '(:alternation "=" "}" :void)))
-;;   (let ((tag-body
-;;           `(,(delimiter-start delimiter)
-;;              ,pt-greedy-whitespace
-;;              (:register ,func-char)
-;;              ,pt-greedy-whitespace
-;;              (:register ,content)
-;;              ,pt-whitespace
-;;              ,end-char
-;;              ,(delimiter-end delimiter))))
-;;     `(:alternation
-;;       (:sequence ;; standalone tag
-;;        (:positive-lookbehind #\Newline)
-;;        (:greedy-repetition 0 nil #\ )
-;;        ;:start-anchor (:greedy-repetition 0 nil #\ )
-;;        ,@tag-body
-;;        (:greedy-repetition 0 nil #\ ) #\Newline)
-;;       (:sequence
-;;        ,@tag-body))))
+;; TODO: wth is wrong about this parser? I'm getting an error about cl-ppcre
+#|
+(defun make-tag-parser (&key (delimiter *delimiter*)
+                          (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
+                          (content pt-everything)
+                          (end-char '(:alternation "=" "}" :void)))
+  (let ((tag-body
+          `(,(delimiter-start delimiter)
+             ,pt-greedy-whitespace
+             (:register ,func-char)
+             ,pt-greedy-whitespace
+             (:register ,content)
+             ,pt-whitespace
+             ,end-char
+             ,(delimiter-end delimiter))))
+    `(:alternation
+      (:sequence ;; standalone tag
+       (:positive-lookbehind #\Newline)
+       (:greedy-repetition 0 nil #\ )
+       ;:start-anchor (:greedy-repetition 0 nil #\ )
+       ,@tag-body
+       (:greedy-repetition 0 nil #\ ) #\Newline)
+      (:sequence
+       ,@tag-body))))
+|#
 
 
+;; TODO: parser functions would be incredibly simpler if only I could
+;; use fixed-length look-behind(or look-behind to a named group) in
+;; cl-ppcre parse trees.
 (defun make-tag-parser (&key (delimiter *delimiter*)
                           (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
                           (content pt-everything)
                           (end-char '(:alternation "=" "}" :void)))
   `(:sequence
     (:register
-     (:alternation
-      (:sequence #\Newline ,pt-greedy-whitespace) ""))
+     (:sequence ,pt-greedy-whitespace))
     (:sequence
      ,(delimiter-start delimiter)
      ,pt-greedy-whitespace
@@ -95,28 +100,7 @@
      ,end-char
      ,(delimiter-end delimiter)
      (:register
-      (:alternation
-       (:sequence ,pt-greedy-whitespace #\Newline) "")))))
-
-(defun handle-standalone-tag (tag-parts)
-  (let ((before-tag (elt tag-parts 0)) ;; destructuring on arrays?
-        (func-char (if (zerop (length (elt tag-parts 1)))
-                       nil
-                       (char (elt tag-parts 1) 0)))
-        (tag-content (elt tag-parts 2))
-        (after-tag (elt tag-parts 3)))
-    (let ((tag (make-tag :func-char func-char
-                         :content tag-content)))
-      (if (and (position #\Newline before-tag)
-               (position #\Newline after-tag)
-               )
-          ;; tag is standalone, we need to add a newline since we
-          ;; matched 2 newlines
-          ;(list (string #\Newline) tag)
-          (list tag (string #\Newline))
-          ;; tag is not standalone, we need to add spaces to rendered string
-          ;(list before-tag tag after-tag)
-          (list after-tag tag before-tag)))))
+      (:sequence ,pt-greedy-whitespace)))))
 
 (defstruct tag func-char content)
 
@@ -131,40 +115,67 @@
                       delimiter-tag-content)
     (make-delimiter :start open-delimiter :end close-delimiter)))
 
-(defun parse-template (template &optional (result '()) (delimiter-stack (list *delimiter*)))
+(defun parse-line (line delimiter-stack &optional result)
+  "Parse a line to tokens, return values of results(in reversed order) and updated delimiter stack.
+line should be a string."
+  ;; I decided to parse each line separately because it's easier to
+  ;; handle standalone tags with this
+  (let ((parser (make-tag-parser :delimiter (top-stack delimiter-stack))))
+    (multiple-value-bind (start-idx end-idx parts-start parts-end)
+        (cl-ppcre:scan parser line)
+      (if (null start-idx)
+          (values (remove-if (lambda (x) (and (stringp x) (zerop (length x))))
+                             (cons line result))
+                  delimiter-stack
+                  nil)
+          ;; TODO: match before-tag and rest in parse tree and use scan-to-strings
+          (let ((before-tag (subseq line 0 start-idx))
+                (before-tag-space (subseq line (elt parts-start 0) (elt parts-end 0)))
+                (after-tag-space (subseq line (elt parts-start 3) (elt parts-end 3)))
+                (func-char (if (= (elt parts-start 1) (elt parts-end 1))
+                               nil
+                               (char line (elt parts-start 1))))
+                (content (subseq line (elt parts-start 2) (elt parts-end 2)))
+                (rest (subseq line end-idx)))
+            (case func-char
+              ((#\# #\^)
+               (push (top-stack delimiter-stack) delimiter-stack))
+              ((#\=)
+               (pop delimiter-stack)
+               (push (parse-delimiter content) delimiter-stack))
+              ((#\/)
+               (pop delimiter-stack)))
+            (let ((tag (make-tag :func-char func-char
+                                 :content content)))
+              (if (and (null result)
+                       (zerop start-idx)
+                       (= (length line) end-idx)
+                       (not (member func-char '(#\{ #\& nil))))
+                  ;; tag is standalone
+                  (values (cons tag result) delimiter-stack t)
+                  (parse-line
+                   rest
+                   delimiter-stack
+                   (append (list after-tag-space tag before-tag-space before-tag) result)))))))))
+
+(defvar *newline* (string #\Newline))
+
+;; TODO: consing and then reversing is ugly, find a better idiom to
+;; append a list/array/vector/any-kind-of-ordered-collection
+(defun parse-template (stream &optional (result '()) (delimiter-stack (list *delimiter*)))
   "Parse template to tokens. A token is a string or tag struct.
 This function also removes delimiter change tags from template, so there's no need to
 handle delimiter change tags in render function."
-  (let ((parser (make-tag-parser :delimiter (top-stack delimiter-stack))))
-    (multiple-value-bind (start-idx end-idx parts-start parts-end)
-        (cl-ppcre:scan parser template)
-      (cond ((null start-idx) ;; rest of the template doesn't contain any tags
-             (reverse (cons template result)))
-            ((zerop start-idx) ;; next tag is at the beginning of template
-             (let ((func-char (if (= (elt parts-start 1) (elt parts-end 1))
-                                  nil
-                                  (char template (elt parts-start 1))))
-                   (content (subseq template (elt parts-start 2) (elt parts-end 2))))
-               (case func-char
-                 ((#\# #\^)
-                  (push (top-stack delimiter-stack) delimiter-stack))
-                 ((#\=)
-                  (pop delimiter-stack)
-                  (push (parse-delimiter content) delimiter-stack))
-                 ((#\/)
-                  (pop delimiter-stack)))
-               ;; TODO: why this call is not tail-call optimized?
-               (parse-template (subseq template end-idx)
-                               (append
-                                (handle-standalone-tag
-                                 (nth-value 1 (cl-ppcre:scan-to-strings parser template)))
-                                result)
-                               delimiter-stack)))
-            (t ;; have a string before tag, should render it first
-             (parse-template (subseq template start-idx)
-                             (cons (subseq template 0 start-idx) result)
-                             delimiter-stack))))))
-
+  (multiple-value-bind (line end-of-stream-p)
+      (read-line stream nil)
+    (multiple-value-bind (line-tokens new-delimiter-stack standalone-p)
+        (parse-line (or line "") delimiter-stack)
+      (let ((r (append (cons (if (or standalone-p end-of-stream-p) "" *newline*)
+                             line-tokens)
+                       result)))
+        (if end-of-stream-p
+            (reverse r)
+            (parse-template stream r new-delimiter-stack))))))
 
 (defun collect-tokens (tokens target)
   "Collect tokens in token list up to target tag."
@@ -187,19 +198,21 @@ handle delimiter change tags in render function."
           out)))))
   out)
 
-(defun render (template-or-tokens stack partials &optional (out (make-string-output-stream)))
+(defun render (stream-or-tokens stack partials &optional (out (make-string-output-stream)))
   "Renders a template or list of tokens and princs it to `out` output stream. Returns out.
 A token is a string or mustache tag(struct tag). Stack is a list of alists."
   ;; Parse template to tokens when needed
-  (let ((tokens (if (stringp template-or-tokens)
-                    (parse-template template-or-tokens)
-                    template-or-tokens)))
+  (let ((tokens (if (streamp stream-or-tokens)
+                    (parse-template stream-or-tokens)
+                    stream-or-tokens)))
     (loop for token-list on tokens do
       (let ((token (first token-list)))
         (cond ((eql (top-stack stack) *falsey-indicator*)
-               (when (and (tag-p token)
-                          (eql (tag-func-char token) #\/))
-                 (pop stack)))
+               (when (tag-p token)
+                 (cond ((eql (tag-func-char token) #\/) (pop stack))
+                       ((member (tag-func-char token) '(#\^ #\#))
+                        ;; nested falsey sections
+                        (push *falsey-indicator* stack)))))
               ((stringp token)
                (princ token out))
               (t ;; token is a tag
@@ -208,8 +221,9 @@ A token is a string or mustache tag(struct tag). Stack is a list of alists."
                       (tag-data (search-stack tag-content stack)))
                  (case func-char
                    
-                   ((#\#)
-                    (cond ((null tag-data)
+                   ((#\# #\^)
+                    (cond ((or (and (null tag-data) (eql func-char #\#))
+                               (and (not (null tag-data)) (eql func-char #\^)))
                            (push *falsey-indicator* stack))
                           ((vectorp tag-data)
                            (unless (zerop (length tag-data))
@@ -229,8 +243,6 @@ A token is a string or mustache tag(struct tag). Stack is a list of alists."
                            )
                           (t (push tag-data stack))))
 
-                   ((#\^))
-                   
                    ((#\/)
                     (pop stack))
                    
@@ -239,7 +251,9 @@ A token is a string or mustache tag(struct tag). Stack is a list of alists."
 
                    ((#\>)
                     (render
-                     (cdr (assoc tag-content partials :test #'equalp)) stack partials out))
+                     (make-string-input-stream
+                      (or (cdr (assoc tag-content partials :test #'equalp))
+                          "")) stack partials out))
 
                    ((#\!))
                    
@@ -247,6 +261,12 @@ A token is a string or mustache tag(struct tag). Stack is a list of alists."
                     (princ (cl-who:escape-string-all (ensure-string tag-data)) out)))))))))
   out)
 
+;; TODO: I think I should handle reading from JSON files since I have
+;; some specific requirements about parsing JSON files(lists as
+;; arrays, objects as alists etc.)
 (defun mustache-render (template data &optional partials)
   (get-output-stream-string
-   (render template (list data) partials)))
+   (render (if (streamp template)
+               template
+               (make-string-input-stream template))
+           (list data) partials)))
