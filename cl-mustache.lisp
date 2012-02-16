@@ -36,6 +36,14 @@
 (defun top-stack (stack)
   (first stack))
 
+(defun utf8-json-decode (pathname)
+  "Read JSON data from pathname in a format mustache-render needs."
+  (with-open-file (stream pathname
+                          :direction :input
+                          :external-format :utf-8)
+    (json:parse stream :object-as :alist
+                       :json-arrays-as-vectors t)))
+
 ;; ---------------------------------------------------------------------
 
 (defstruct delimiter
@@ -52,33 +60,6 @@
 (defvar pt-whitespace '(:non-greedy-repetition 0 nil :whitespace-char-class))
 (defvar pt-greedy-whitespace '(:greedy-repetition 0 nil :whitespace-char-class))
 (defvar pt-everything '(:non-greedy-repetition 0 nil (:alternation :everything #\Newline)))
-
-;; TODO: wth is wrong about this parser? I'm getting an error about cl-ppcre
-#|
-(defun make-tag-parser (&key (delimiter *delimiter*)
-                          (func-char '(:alternation "=" ">" "{" "^" "!" "&" "#" "/" :void))
-                          (content pt-everything)
-                          (end-char '(:alternation "=" "}" :void)))
-  (let ((tag-body
-          `(,(delimiter-start delimiter)
-             ,pt-greedy-whitespace
-             (:register ,func-char)
-             ,pt-greedy-whitespace
-             (:register ,content)
-             ,pt-whitespace
-             ,end-char
-             ,(delimiter-end delimiter))))
-    `(:alternation
-      (:sequence ;; standalone tag
-       (:positive-lookbehind #\Newline)
-       (:greedy-repetition 0 nil #\ )
-       ;:start-anchor (:greedy-repetition 0 nil #\ )
-       ,@tag-body
-       (:greedy-repetition 0 nil #\ ) #\Newline)
-      (:sequence
-       ,@tag-body))))
-|#
-
 
 ;; TODO: parser functions would be incredibly simpler if only I could
 ;; use fixed-length look-behind(or look-behind to a named group) in
@@ -261,12 +242,12 @@ A token is a string or mustache tag(struct tag). Stack is a list of alists."
                     (princ (cl-who:escape-string-all (ensure-string tag-data)) out)))))))))
   out)
 
-;; TODO: I think I should handle reading from JSON files since I have
-;; some specific requirements about parsing JSON files(lists as
-;; arrays, objects as alists etc.)
-(defun mustache-render (template data &optional partials)
+(defun mustache-render (template data-or-json-path &optional partials)
   (get-output-stream-string
    (render (if (streamp template)
                template
                (make-string-input-stream template))
-           (list data) partials)))
+           (list (if (pathnamep data-or-json-path)
+                     (utf8-json-decode data-or-json-path)
+                     data-or-json-path))
+           partials)))

@@ -3,17 +3,10 @@
 (defun walk-directory (directory pattern)
   (directory (merge-pathnames pattern directory)))
 
-(defun utf8-json-decode (pathname)
-  (with-open-file (stream pathname
-                          :direction :input
-                          :external-format :utf-8)
-    (json:parse stream :object-as :alist
-                       :json-arrays-as-vectors t)))
-
 (defvar *spec-directory* #P"~/cl/cl-mustache/mustache.spec/")
 
 (defvar *all-specs* 
-  (mapcar #'utf8-json-decode (walk-directory *spec-directory* "specs/*.json")))
+  (mapcar #'cl-mustache::utf8-json-decode (walk-directory *spec-directory* "specs/*.json")))
 
 (fiveam:def-suite :mustache-specs)
 (fiveam:in-suite :mustache-specs)
@@ -64,3 +57,4 @@
 
 (defun explain ()
   (fiveam:explain! *results*))
+
